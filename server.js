@@ -1,7 +1,12 @@
 const express = require('express');
 const http = require("http");
 const { Server } = require("socket.io");
+const jwt = require('jsonwebtoken');
+require("dotenv").config();
+
 const app = express();
+app.use(express.json());
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -11,10 +16,30 @@ const io = new Server(server, {
 });
 const port = 3000;
 
+const SECRET = process.env.JWT_SECRET;
+
 // this is good for small systems but as the system grow switch to Redis for userDeviceMap & unreadMessageQueue
 const userDeviceMap = new Map();
 const socketMap = new Map();
 const unreadMessageQueue = new Map();
+
+function authenticateToken(req, res, next) {
+
+    const authHeader = req.headers["authorization"];
+    const token = authHeader && authHeader.split(" ")[1];
+
+    if (!token) {
+        return res.sendStatus(401);
+    }
+
+    jwt.verify(token, SECRET, (err, user) => {
+
+        if (err) return res.sendStatus(403);
+
+        req.user = user;
+        next();
+    });
+}
 
 io.on("connection", (socket) => {
     console.log("User connected:", socket.id);
@@ -30,14 +55,14 @@ io.on("connection", (socket) => {
 });
 
 // when offline users come online, sync chats with other users
-app.get('/sync', (req, res) => {
-    const user = req.query;
-    const queueId = user.userId + user.deviceId;
+app.get('/sync', authenticateToken, (req, res) => {
+    const user = req.user;
+    const queueId = user.userID + user.deviceID;
 
     // get the message from the unread message queue
     const unreadMessageList = unreadMessageQueue.get(queueId);
     unreadMessageQueue.delete(queueId);
-    res.json({ user: user.userId, device: user.deviceId, unreadMessages: unreadMessageList });
+    res.json({ user: user.userID, device: user.deviceID, unreadMessages: unreadMessageList });
 })
 
 const sendMessageToUser = (senderId, targetId, message, isGroup = false, groupId = null) => {
@@ -63,8 +88,9 @@ const sendMessageToUser = (senderId, targetId, message, isGroup = false, groupId
     })
 }
 
-app.post('/message', (req, res) => {
-    const { senderId, recipientId, isGroup = false, message, groupMembers = [] } = req.body;
+app.post('/send_message', authenticateToken, (req, res) => {
+    const { recipientId, isGroup = false, message, groupMembers = [] } = req.body;
+    const senderId = req.user.userID;
     try{
         if(isGroup){
             groupMembers.forEach((member) => {
@@ -77,6 +103,27 @@ app.post('/message', (req, res) => {
     } catch (e){
         res.status(500).json({status: "Failed"});
     }
+})
+
+app.post('/login', (req, res) => {
+    try{
+        const { username, password, deviceID } = req.body;
+        // firebase shit
+        const userId = "something";
+        const payload = {
+            userID: userId,
+            deviceID: deviceID
+        };
+
+        const token = jwt.sign(payload, SECRET, {
+            expiresIn: '7 days'
+        })
+
+        res.status(200).json({status: "Success", userID: userId, jwt: token});
+    } catch (e) {
+        res.status(500).json({status: "Failed"});
+    }
+    
 })
 
 server.listen(port, () => {

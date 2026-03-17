@@ -65,6 +65,12 @@ app.get('/sync', authenticateToken, (req, res) => {
     res.json({ user: user.userID, device: user.deviceID, unreadMessages: unreadMessageList });
 })
 
+app.get('/get_session', authenticateToken, (req, res) => {
+    if(req.user){
+        res.status(200).json({ status: "Success" });
+    }
+})
+
 const sendMessageToUser = (senderId, targetId, message, isGroup = false, groupId = null) => {
     const deviceList = userDeviceMap.get(targetId);
     deviceList.forEach((device) => {

@@ -3,6 +3,8 @@ const http = require("http");
 const { Server } = require("socket.io");
 const jwt = require('jsonwebtoken');
 require("dotenv").config();
+import admin from 'firebase-admin';
+import fs from 'fs';
 
 const app = express();
 app.use(express.json());
@@ -18,10 +20,15 @@ const port = 3000;
 
 const SECRET = process.env.JWT_SECRET;
 
-// this is good for small systems but as the system grow switch to Redis for userDeviceMap & unreadMessageQueue
-const userDeviceMap = new Map();
-const socketMap = new Map();
-const unreadMessageQueue = new Map();
+const serviceAccount = JSON.parse(
+    fs.readFileSync('./secret.json', 'utf8')
+);
+
+admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+});
+
+const db = admin.firestore();
 
 function authenticateToken(req, res, next) {
 
@@ -41,29 +48,37 @@ function authenticateToken(req, res, next) {
     });
 }
 
+async function getAllChats(userId){
+    const chatList = await db.collection("Chats").where("chatMembers", "array-contains", userId).get()
+    return chatList;
+}
+
 io.on("connection", (socket) => {
     console.log("User connected:", socket.id);
     const { userId, deviceId } = socket.handshake.auth;
     const key = userId + deviceId;
-    socketMap.set(key, socket.id);
     socket.pagedAuthKey = key;
+
+    const chatList = getAllChats(userId);
+    chatList.forEach(chat => {
+        socket.join(`room-${chat.id}`);
+    });
 
     socket.on("disconnect", () => {
         console.log("User disconnected:", socket.id);
-        socketMap.delete(socket.pagedAuthKey);
     });
 });
 
 // when offline users come online, sync chats with other users
-app.get('/sync', authenticateToken, (req, res) => {
-    const user = req.user;
-    const queueId = user.userID + user.deviceID;
+// app.get('/sync', authenticateToken, (req, res) => {
+//     const user = req.user;
+//     const queueId = user.userID + user.deviceID;
 
-    // get the message from the unread message queue
-    const unreadMessageList = unreadMessageQueue.get(queueId);
-    unreadMessageQueue.delete(queueId);
-    res.json({ user: user.userID, device: user.deviceID, unreadMessages: unreadMessageList });
-})
+//     // get the message from the unread message queue
+//     const unreadMessageList = unreadMessageQueue.get(queueId);
+//     unreadMessageQueue.delete(queueId);
+//     res.json({ user: user.userID, device: user.deviceID, unreadMessages: unreadMessageList });
+// })
 
 app.get('/get_session', authenticateToken, (req, res) => {
     if(req.user){
@@ -71,51 +86,27 @@ app.get('/get_session', authenticateToken, (req, res) => {
     }
 })
 
-const sendMessageToUser = (senderId, targetId, message, isGroup = false, groupId = null) => {
-    const deviceList = userDeviceMap.get(targetId);
-    deviceList.forEach((device) => {
-        const now = new Date();
-        const isoString = now.toISOString();
-        // client first check if isGroup == true, if it is save the msg under the group if not save it under the dm
-        const messageObject = { senderId: senderId, msg: message, datetime: isoString, isGroup: isGroup, groupId: groupId };
-        const pagedAuthId = targetId+device;
-        const socketId = socketMap.get(pagedAuthId);
-        if(!socketMap.has(pagedAuthId)){
-            if(unreadMessageQueue.has(pagedAuthId)){
-                const msgList = unreadMessageQueue.get(pagedAuthId);
-                msgList.push(messageObject);
-            } else {
-                unreadMessageQueue.set(pagedAuthId, [messageObject]);
-            }
-        } else {
-            io.to(socketId).emit("receive_msg", messageObject)
-        }
-        
-    })
-}
-
 app.post('/send_message', authenticateToken, (req, res) => {
-    const { recipientId, isGroup = false, message, groupMembers = [] } = req.body;
-    const senderId = req.user.userID;
-    try{
-        if(isGroup){
-            groupMembers.forEach((member) => {
-                sendMessageToUser(senderId, member, message, isGroup, recipientId);
-            })
-        } else {
-            sendMessageToUser(senderId, recipientId, message);
-        }
-        res.status(200).json({status: "Success"});
-    } catch (e){
-        res.status(500).json({status: "Failed"});
-    }
+    const recipientId = req.body.RecipientId;
+    io.to(`room-${recipientId}`).emit("new_message", req);
 })
+
+async function getUser(username, password){
+    const user = await db.collection("Users").where("username", username).where("password", password).get();
+    if(!user.empty){
+        return user.id;
+    }
+    return null;
+}
 
 app.post('/login', (req, res) => {
     try{
         const { username, password, deviceID } = req.body;
-        // firebase shit
-        const userId = "something";
+
+        const userId = getUser(username, password);
+        if(userId == null){
+            res.status(400).json({status: "Failed"});
+        }
         const payload = {
             userID: userId,
             deviceID: deviceID
